@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Web;
 using Newtonsoft.Json.Linq;
 using PushSharp.Core;
+using System.Diagnostics;
 
 namespace PushSharp.Windows
 {
@@ -14,6 +15,7 @@ namespace PushSharp.Windows
     {
         public string AccessToken { get; private set; }
         public string TokenType { get; private set; }
+        public static DateTime ExpiresIn { get; private set; }
 
         WindowsPushChannelSettings channelSettings;
 
@@ -24,6 +26,7 @@ namespace PushSharp.Windows
 
         void RenewAccessToken()
         {
+            Trace.WriteLine("RenewAcessToken");
             var postData = new StringBuilder();
 
             postData.AppendFormat("{0}={1}&", "grant_type", "client_credentials");
@@ -45,11 +48,15 @@ namespace PushSharp.Windows
 
             var accessToken = json.Value<string>("access_token");
             var tokenType = json.Value<string>("token_type");
+            var expiresIn = (json["expires_in"] != null) ? json.Value<int>("expires_in") : 60 * 60; // 1 hora
 
             if (!string.IsNullOrEmpty(accessToken) && !string.IsNullOrEmpty(tokenType))
             {
                 this.AccessToken = accessToken;
                 this.TokenType = tokenType;
+                expiresIn -= 60; // 1 minuto
+                ExpiresIn = DateTime.Now + new TimeSpan(0, 0, expiresIn);
+                Trace.WriteLine("token: expiresIn: " + expiresIn + " - " + ExpiresIn);
             }
             else
             {
@@ -61,7 +68,16 @@ namespace PushSharp.Windows
         {
             //See if we need an access token
             if (string.IsNullOrEmpty(AccessToken))
+            {
+                Trace.WriteLine("AccessToken nulo, renovando");
                 RenewAccessToken();
+            }
+
+            if (DateTime.Now > ExpiresIn)
+            {
+                Trace.WriteLine("AccessToken expirado, renovando");
+                RenewAccessToken();
+            }
 
             var winNotification = notification as WindowsNotification;
 
@@ -274,6 +290,8 @@ namespace PushSharp.Windows
 
         void HandleStatus(WindowsNotificationStatus status, SendNotificationCallbackDelegate callback)
         {
+            Boolean shouldRequeue = false;
+
             if (callback == null)
                 return;
 
@@ -303,6 +321,12 @@ namespace PushSharp.Windows
                 return;
             }
 
+            if (status.HttpStatus == HttpStatusCode.Unauthorized)
+            {
+                Trace.WriteLine("Status no autorizado, reencolando");
+                shouldRequeue = true;
+            }
+
             if (status.HttpStatus == HttpStatusCode.NotFound || status.HttpStatus == HttpStatusCode.Gone) //404 or 410
             {
                 callback(this, new SendNotificationResult(status.Notification, false, new Exception("Device Subscription Expired"))
@@ -315,7 +339,7 @@ namespace PushSharp.Windows
                 return;
             }
 
-            callback(this, new SendNotificationResult(status.Notification, false, new WindowsNotificationSendFailureException(status)));
+            callback(this, new SendNotificationResult(status.Notification, shouldRequeue, new WindowsNotificationSendFailureException(status)));
         }
 
         public void Dispose()
